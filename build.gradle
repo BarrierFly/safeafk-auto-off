@@ -1,0 +1,67 @@
+plugins {
+	id 'maven-publish'
+	id 'com.github.hierynomus.license' version '0.16.1' apply false
+	id 'net.fabricmc.fabric-loom' version '1.17-SNAPSHOT' apply false
+	id 'net.fabricmc.fabric-loom-remap' version '1.17-SNAPSHOT' apply false
+
+	// https://github.com/ReplayMod/preprocessor
+	// https://github.com/Fallen-Breath/preprocessor
+	id 'com.replaymod.preprocess' version 'c5abb4fb12'
+}
+
+preprocess {
+	strictExtraMappings = false
+
+	def mc117  = createNode('1.17.1', 1_17_01, '')
+	def mc1194 = createNode('1.19.4', 1_19_04, '')
+	def mc1201 = createNode('1.20.1', 1_20_01, '')
+	def mc1206 = createNode('1.20.6', 1_20_06, '')
+	def mc1211 = createNode('1.21.1', 1_21_01, '')
+	def mc12111 = createNode('1.21.11', 1_21_11, '')
+
+	mc117.link(mc1194, null)
+	mc1194.link(mc1201, null)
+	mc1201.link(mc1206, null)
+	mc1206.link(mc1211, null)
+	mc1211.link(mc12111, null)
+
+	for (final def node in getNodes()) {
+		findProject(node.project).ext.mcVersion = node.mcVersion
+	}
+}
+
+tasks.register('buildAndGather') {
+	subprojects {
+		dependsOn project.tasks.named('build').get()
+	}
+	doFirst {
+		println 'Gathering builds'
+		def buildLibs = {
+			p -> p.buildDir.toPath().resolve('libs')
+		}
+		delete fileTree(buildLibs(rootProject)) {
+			include '*'
+		}
+		subprojects {
+			copy {
+				from(buildLibs(project)) {
+					include '*.jar'
+					exclude '*-dev.jar', '*-sources.jar', '*-shadow.jar'
+				}
+				into buildLibs(rootProject)
+				duplicatesStrategy = DuplicatesStrategy.INCLUDE
+			}
+		}
+	}
+}
+
+tasks.register('cleanPreprocessSources') {
+	doFirst {
+		subprojects {
+			def path = project.projectDir.toPath().resolve('build/preprocessed')
+			if (path.toFile().isDirectory()) {
+				path.toFile().deleteDir()
+			}
+		}
+	}
+}

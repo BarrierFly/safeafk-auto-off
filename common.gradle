@@ -1,0 +1,174 @@
+final int mcVersion = project.mcVersion
+final boolean unobfuscated = mcVersion >= 26_00_00
+
+apply plugin: 'maven-publish'
+apply plugin: unobfuscated ? 'net.fabricmc.fabric-loom' : 'net.fabricmc.fabric-loom-remap'
+apply plugin: 'com.replaymod.preprocess'
+
+repositories {
+	maven {
+		url = 'https://maven.parchmentmc.org'
+		content { includeGroup('org.parchmentmc.data') }
+	}
+	maven {
+		url = 'https://masa.dy.fi/maven'
+		content { includeGroupAndSubgroups('fi.dy.masa') }
+	}
+	maven {
+		url = 'https://masa.dy.fi/maven/sakura-ryoko'
+		content { includeGroupAndSubgroups('fi.dy.masa') }
+	}
+	maven {
+		url = 'https://maven.fallenbreath.me/jitpack'
+		content { includeGroupAndSubgroups('com.github') }
+	}
+	maven {
+		url = 'https://maven.fallenbreath.me/releases'
+		content { includeGroup('me.fallenbreath') }
+	}
+}
+
+dependencies {
+	def processDependency = { dep ->
+		if (dep instanceof ModuleDependency) {
+			if (!(dep.group == 'net.fabricmc' && dep.name == 'fabric-loader')) {
+				dep.exclude group: 'net.fabricmc', module: 'fabric-loader'
+			}
+			if (!(dep.group == 'com.github.sakura-ryoko' && dep.name == 'malilib')) {
+				dep.exclude group: 'com.github.sakura-ryoko', module: 'malilib'
+			}
+			dep.exclude group: 'io.github.prospector', module: 'modmenu'
+		}
+		return dep
+	}
+	def autoImplementation = { Object... args -> processDependency(unobfuscated ? implementation(*args) : modImplementation(*args)) }
+
+	// loom
+	minecraft "com.mojang:minecraft:${project.minecraft_version}"
+	if (!unobfuscated) {
+		mappings loom.layered() {
+			officialMojangMappings()
+			if (project.parchment_version.size() > 0) {
+				parchment("org.parchmentmc.data:parchment-${project.minecraft_version}:${project.parchment_version}@zip")
+			}
+		}
+	}
+	autoImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
+
+	// malilib (dependency of tweakermore, needed at runtime)
+	autoImplementation(project.malilib_version)
+
+	// tweakermore — compile-only dependency.
+	// Build tweakermore first (`compileJava` at minimum), then this mod finds its classes.
+	// Using compileOnly because dev jars/classes are already in Mojang mappings.
+	def tweakermoreBuildDir = rootProject.file("../tweakermore/versions/${project.minecraft_version}/build")
+	def tweakermoreDevJarDir = new File(tweakermoreBuildDir, 'devlibs')
+	def tweakermoreClassesDir = new File(tweakermoreBuildDir, 'classes/java/main')
+	if (tweakermoreDevJarDir.exists()) {
+		compileOnly fileTree(dir: tweakermoreDevJarDir, include: ['*.jar'])
+	} else if (tweakermoreClassesDir.exists()) {
+		compileOnly files(tweakermoreClassesDir)
+	} else {
+		def tweakermoreLibs = new File(tweakermoreBuildDir, 'libs')
+		if (tweakermoreLibs.exists()) {
+			compileOnly fileTree(dir: tweakermoreLibs, include: ['tweakermore-*.jar'])
+		}
+	}
+
+	// conditional-mixin (required by tweakermore's API)
+	include(autoImplementation("me.fallenbreath:conditional-mixin-fabric:${project.conditionalmixin_version}"))
+}
+
+String MIXIN_CONFIG_PATH = 'safeafk-auto-off.mixins.json'
+JavaVersion JAVA_COMPATIBILITY
+if (mcVersion >= 260000) {
+	JAVA_COMPATIBILITY = JavaVersion.VERSION_25
+} else if (mcVersion >= 12005) {
+	JAVA_COMPATIBILITY = JavaVersion.VERSION_21
+} else if (mcVersion >= 11800) {
+	JAVA_COMPATIBILITY = JavaVersion.VERSION_17
+} else if (mcVersion >= 11700) {
+	JAVA_COMPATIBILITY = JavaVersion.VERSION_16
+} else {
+	JAVA_COMPATIBILITY = JavaVersion.VERSION_1_8
+}
+JavaVersion MIXIN_COMPATIBILITY_LEVEL = JAVA_COMPATIBILITY
+
+loom {
+	def commonVmArgs = ['-Dmixin.debug.export=true']
+	runConfigs.configureEach {
+		runDir '../../run'
+		vmArgs commonVmArgs
+	}
+	runConfigs.client {
+		ideConfigGenerated = true
+	}
+
+	mixin {
+		useLegacyMixinAp = !unobfuscated
+	}
+}
+
+String modVersionSuffix = ''
+String artifactVersion = project.mod_version
+String artifactVersionSuffix = ''
+if (System.getenv("BUILD_RELEASE") != "true") {
+	String buildNumber = System.getenv("BUILD_ID")
+	modVersionSuffix += buildNumber != null ? ('+build.' + buildNumber) : '-SNAPSHOT'
+	artifactVersionSuffix = '-SNAPSHOT'
+}
+String fullModVersion = project.mod_version + modVersionSuffix
+String fullProjectVersion, fullArtifactVersion
+
+group = project.maven_group
+if (System.getenv("JITPACK") == "true") {
+	base.archivesName = project.archives_base_name + '-mc' + project.minecraft_version
+	fullProjectVersion = 'v' + project.mod_version + modVersionSuffix
+	fullArtifactVersion = artifactVersion + artifactVersionSuffix
+} else {
+	base.archivesName = project.archives_base_name
+	fullProjectVersion = 'v' + project.mod_version + '-mc' + project.minecraft_version + modVersionSuffix
+	fullArtifactVersion = artifactVersion + '-mc' + project.minecraft_version + artifactVersionSuffix
+}
+version = fullProjectVersion
+
+processResources {
+	def modProperties = [
+			"id"                  : project.mod_id,
+			"name"                : project.mod_name,
+			"version"             : fullModVersion,
+			"minecraft_dependency": project.minecraft_dependency,
+	]
+	def archivesBaseNameVal = base.archivesName.get()
+	inputs.properties(modProperties)
+	inputs.property("archivesBaseName", archivesBaseNameVal)
+
+	filesMatching("fabric.mod.json") {
+		expand modProperties
+	}
+
+	filesMatching(MIXIN_CONFIG_PATH) {
+		filter { s -> s.replace('{{COMPATIBILITY_LEVEL}}', "JAVA_${MIXIN_COMPATIBILITY_LEVEL.ordinal() + 1}") }
+	}
+}
+
+tasks.withType(JavaCompile).configureEach {
+	options.encoding = "UTF-8"
+	options.compilerArgs << "-Xlint:deprecation" << "-Xlint:unchecked"
+	if (JAVA_COMPATIBILITY <= JavaVersion.VERSION_1_8) {
+		options.compilerArgs << '-Xlint:-options'
+	}
+}
+
+java {
+	sourceCompatibility = JAVA_COMPATIBILITY
+	targetCompatibility = JAVA_COMPATIBILITY
+	withSourcesJar()
+}
+
+jar {
+	inputs.property "archives_base_name", project.archives_base_name
+	from("../../LICENSE") {
+		rename { "${it}_${inputs.properties.archives_base_name}" }
+	}
+}
